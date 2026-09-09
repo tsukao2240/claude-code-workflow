@@ -303,6 +303,7 @@ Only保証そのものではない。
 [ ] /reference/if のxlsxをsheet/range指定でテキスト化できる
 [ ] xlsx解析後も元ファイルのタイムスタンプ・内容が変わっていない
 [ ] コンテナ内から既存Skillの方法でRedmineを取得できる
+[ ] コンテナ内でgitのuser.name / user.emailが設定されている（本題SkillのWIP commitに必要）
 [ ] コンテナ再作成後もClaude Codeを再手動インストールする必要がない
 [ ] 派生イメージの追加パッケージがClaude CodeとExcel解析ツールだけである
 [ ] 必要なClaude設定/Skillが再利用できる
