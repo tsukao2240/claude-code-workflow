@@ -17,7 +17,7 @@ Codeから参照資料を破壊できない実行環境を構築する。
 
 -   ホストOS: Windows
 -   WSL2導入済み
--   Podmanで開発環境を構築済み
+-   PodmanはWindows側のpodman machine（WSL2 backend）経由で使用する。WSL2ディストリビューション内にPodmanを直接導入する構成ではない
 -   Windows側のソースとコンテナ側の開発領域はMutagenで同期
 -   Claude CodeはWindowsネイティブでもコンテナ内でも起動可能
 -   現在の開発用PodmanイメージにはClaude Codeが標準では含まれない
@@ -39,12 +39,15 @@ Codeを使用する作業ではその派生イメージを利用する。
       ↓ FROM
 Claude用派生イメージ
   + Claude Code
+  + Excel解析ツール
       ↓
 Claude作業用コンテナ
 ```
 
 標準イメージ更新後は派生イメージを再buildするだけでClaude
 Codeを再導入できる状態にする。手動インストールを運用手順に含めない。
+
+派生イメージへ追加するものはClaude Code本体と、`/reference/if`のExcelを読み取り専用で解析するためのツール（6.1参照）の2点に限定する。
 
 ## 4. ディレクトリ構成
 
@@ -120,6 +123,18 @@ Claude Codeから以下を不可能にする。
 Read
 OnlyはSkillやCLAUDE.mdの指示だけではなく、Podmanのマウント設定で強制する。
 
+podman machine経由のため、Windows側パスはpodman machine VM内に自動マウントされたパス（例: `/mnt/c/...`）を介してコンテナへ渡る。
+
+``` text
+Windows  C:\...\ai-reference
+   ↓ podman machine が VM 内へ自動マウント
+VM       /mnt/c/.../ai-reference
+   ↓ podman run -v ...:/reference:ro
+Container /reference   (RO)
+```
+
+`podman run -v`にはWindowsパスをそのまま指定できるが、実際にどのVM内パスへ変換されるか、`:ro`が有効かは14.7の書き込み試験で必ず確認する。VM内の自動マウントはWindowsドライブ全体を対象とするため、コンテナへマウントするのは`ai-reference`ディレクトリだけに限定する。
+
 ### 5.3 Claude設定・Skill
 
 Claude Codeの設定、Skill等はコンテナ再作成で失われないよう永続化する。
@@ -131,6 +146,18 @@ Claude Codeの設定、Skill等はコンテナ再作成で失われないよう�
 
 `~/.claude`全体を永続化する場合は、認証情報や会社ポリシーとの整合を確認する。
 
+### 5.4 Redmineアクセス
+
+Redmineの取得方法・認証は、既存のPR本文生成Skillが現在使用しているものをそのまま使う。本仕様で新しい認証方式や認証情報の保存場所を設計しない。
+
+環境構築側で行うのは以下だけ。
+
+-   既存Skillが認証情報をどこから読んでいるか（環境変数、設定ファイル、`~/.claude`配下など）を調査する
+-   コンテナ内の既存Skillからも同じ方法で到達できるよう、必要な環境変数の引き渡しまたは設定ファイルの永続化を行う
+-   コンテナからRedmineへのネットワーク到達性を確認する
+
+認証情報を派生イメージへ焼き込まない。Git管理へ入れない。
+
 ## 6. Claude用派生イメージ
 
 最小構成のDockerfile/Containerfileを作る。
@@ -140,8 +167,11 @@ Claude Codeの設定、Skill等はコンテナ再作成で失われないよう�
 ``` dockerfile
 FROM <project-development-image>
 
-# ベースイメージのNode/npm環境等に合わせてClaude Codeを導入する。
-RUN npm install -g @anthropic-ai/claude-code
+# Claude Code: 公式のNative Install（14.2参照）。npm版を既定にしない。
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Excel解析ツール（6.1参照）
+RUN pip install --no-cache-dir openpyxl
 ```
 
 実際の導入方法は会社環境、ベースイメージ、Claude
@@ -150,10 +180,30 @@ Code公式の現行インストール方法に合わせる。
 要求:
 
 -   ベース開発環境を壊さない
--   Claude Code導入以外の変更を極力入れない
+-   Claude Code本体とExcel解析ツール以外の変更を入れない
 -   rebuild可能
 -   手作業によるClaude再インストールを不要にする
 -   バージョン固定の要否を判断できる構成にする
+
+### 6.1 Excel解析ツール
+
+`/reference/if`のAPI IFはExcelで配置される。Claude Codeはxlsxを直接読めないため、派生イメージに解析手段を含める。
+
+方針:
+
+-   ベースイメージにPythonがあれば`openpyxl`を追加する
+-   Pythonがなければ`python3`と`openpyxl`を追加する。Node側のxlsxライブラリを選んでもよいが、どちらか1つに固定する
+-   解析は読み取り専用で行う。xlsxを開いて保存する処理を含めない
+-   sheet名・range指定で必要部分だけをテキスト（TSVまたはMarkdown表）へ出力する小さなスクリプトを`claude-container/`配下に置き、Skillから呼べるようにする
+
+スクリプトの入出力例:
+
+``` text
+input : /reference/if/xxx.xlsx, sheet=API001, range=B12:N35
+output: 標準出力へTSV
+```
+
+一時ファイルが必要な場合はコンテナ内の一時領域を使い、`/reference`配下へは書かない。`/reference`はRO mountなので、書こうとしても失敗する。
 
 ## 7. 起動方式
 
@@ -237,6 +287,9 @@ Only保証そのものではない。
 [ ] /reference既存ファイルの上書きが失敗する
 [ ] /reference既存ファイルの削除が失敗する
 [ ] Windows側からai-referenceを編集できる
+[ ] /reference/if のxlsxをsheet/range指定でテキスト化できる
+[ ] xlsx解析後も元ファイルのタイムスタンプ・内容が変わっていない
+[ ] コンテナ内から既存Skillの方法でRedmineを取得できる
 [ ] コンテナ再作成後もClaude Codeを再手動インストールする必要がない
 [ ] Claude CodeのためだけにNode.js/npmが追加されていない
 [ ] 必要なClaude設定/Skillが再利用できる
@@ -256,6 +309,8 @@ Only確認はClaudeへの質問ではなく、実際のOSコマンドで書き�
 -   referenceがGit管理対象外
 -   Windows側利用者はreferenceをR/W可能
 -   Claude設定/Skillの永続化方法が確定
+-   Excel解析ツールが派生イメージに含まれ、読み取り専用で動作
+-   コンテナ内から既存Skillの方法でRedmineへ到達可能
 -   イメージ更新後の再build手順が確定
 -   Read Only境界の実動作試験がPASS
 
@@ -270,7 +325,7 @@ Reference Root:      /reference
 
 本題Skillはこの境界を前提として、API実装検証・敵対的レビュー・PR本文生成を行う。
 
-# 14. Claude Codeへ渡す実装指示
+## 14. Claude Codeへ渡す実装指示
 
 この文書をClaude Codeへ渡した場合、以下の順序で作業すること。
 
@@ -280,7 +335,9 @@ Reference Root:      /reference
 
 最低限確認するもの:
 
--   Podmanの起動方法
+-   podman machineの構成（machine名、rootful/rootless、WSL2 backendのディストリビューション名）
+-   podman machine VM内でWindowsドライブがどのパスへ自動マウントされているか
+-   既存コンテナが使用しているvolume/bind mountのWindows側パスとVM内パスの対応
 -   Containerfile / Dockerfileの有無と配置
 -   compose / podman-compose / shell script等の起動定義
 -   使用中のベースイメージ
@@ -292,6 +349,8 @@ Reference Root:      /reference
 -   volume / bind mount
 -   現在のClaude Codeインストール有無
 -   Claude設定・Skillの保存場所
+-   既存PR本文生成SkillのRedmine取得方法と認証情報の読み込み元
+-   ベースイメージのPython有無（Excel解析ツール選定のため）
 -   Gitの認証方法
 -   `gh`の利用方法
 -   ローカルAPIの起動方法
@@ -367,19 +426,21 @@ Verification Plan
 
 ## 14.6 Sandbox
 
-PodmanのRO mountを主たるRead Only境界とする。
+PodmanのRO mountを唯一の必須Read Only境界とする。
 
-さらにコンテナ内Claude Codeでnative
-sandboxを利用可能なら併用を検討する。
+コンテナ内Claude Codeのnative sandboxは初期構成では使用しない。
 
-利用する場合:
+理由:
 
--   Linux/WSL2上で必要依存関係を満たす
--   `sandbox.failIfUnavailable = true`を検討する
--   sandbox失敗時に無保護で継続する構成を避ける
--   Podmanの`/reference:ro`をsandbox設定で書き込み可能に戻さない
+-   native sandboxは`bubblewrap`によるユーザー名前空間のネストを必要とし、rootlessコンテナ内では`--privileged`やseccomp/capabilityの緩和なしに動作しないことが多い
+-   14.4の「セキュリティ制約を緩めてbuild/run成功扱いにしない」と衝突する
+-   `sandbox.failIfUnavailable = true`をコンテナ内で設定すると、sandbox不成立によりClaude Code自体が起動しなくなる
 
-SandboxはPodmanのmount境界を置き換えるものではない。
+したがってコンテナ内では`sandbox`設定を有効化せず、`failIfUnavailable`も設定しない。
+
+Claude Code側の第2層としては、`settings.json`の`permissions.deny`で`/reference`配下へのWrite/Editを拒否する設定を派生イメージまたは永続領域に含める。これは誤操作防止の補助であり、Podman RO mountの代替ではない。
+
+将来、コンテナ側でnative sandboxが権限緩和なしに動作すると確認できた場合のみ併用を再検討する。その場合もPodmanの`/reference:ro`をsandbox設定で書き込み可能に戻さない。
 
 ## 14.7 受入試験
 
@@ -422,6 +483,25 @@ SandboxはPodmanのmount境界を置き換えるものではない。
 
 書き込み試験が1つでも成功した場合はFAIL。
 
+書き込み試験はコンテナ内のシェルから`touch`、`echo >>`、`rm`、`mv`等を実行して行う。podman machine経由のマウントはWindows側パス→VM内パス→コンテナの2段になるため、`:ro`が最終段まで効いていることをこの試験で確認する。
+
+### Excel解析
+
+テスト用xlsxを`ai-reference/if`に用意して:
+
+``` text
+[ ] sheet/range指定でテキスト化できる
+[ ] 解析後に元xlsxのハッシュが変わっていない
+[ ] 解析スクリプトが/reference配下へ一時ファイルを作らない
+```
+
+### Redmine
+
+``` text
+[ ] コンテナ内から既存Skillと同じ方法でRedmine Ticketを取得できる
+[ ] 認証情報が派生イメージ・Git管理対象に含まれていない
+```
+
 ### Isolation
 
 ``` text
@@ -436,6 +516,8 @@ SandboxはPodmanのmount境界を置き換えるものではない。
 
 -   `/reference`へ書き込める
 -   Claude Codeがイメージ再buildで再現できない
+-   Excel解析ツールがイメージ再buildで再現できない
+-   コンテナ内からRedmineへ到達できない
 -   Mutagen同期を破壊した
 -   Windows側環境を壊した
 -   security制約を緩めないと起動できない
@@ -453,6 +535,8 @@ Changed Files
 Added Files
 Container/Image
 Claude Version / Install Method
+Excel Tool
+Redmine Access
 Mounts
 Mutagen Status
 Persistence
@@ -463,7 +547,7 @@ Security Exceptions
 
 `Security Exceptions`がない場合も`None`と明記する。
 
-# 15. Claudeへの開始指示
+## 15. Claudeへの開始指示
 
 この仕様書を受け取ったClaude
 Codeは、いきなり実装を開始せず、まず14.1の現状調査を行うこと。

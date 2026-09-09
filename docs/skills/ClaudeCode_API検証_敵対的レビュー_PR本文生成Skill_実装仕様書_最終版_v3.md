@@ -94,6 +94,8 @@ WindowsネイティブClaudeから本Skillを実行することを正規経路�
 
 Ticket IDは現在のbranch名から既存Skillと同じ方法で取得する。
 
+Redmineへのアクセス方法・認証も既存Skillのものをそのまま使う。本Skillで新しいRedmineクライアントや認証情報の読み込み方法を実装しない。コンテナ内から同じ方法で到達できることは環境構築仕様書5.4で担保する。
+
 ### API IF
 
 ``` text
@@ -101,6 +103,8 @@ Ticket IDは現在のbranch名から既存Skillと同じ方法で取得する。
 ```
 
 から対象Excelを検索する。
+
+xlsxの読み取りには環境構築仕様書6.1で派生イメージに含めたExcel解析ツールを使う。Skill内で独自のxlsx解析処理を実装しない。
 
 必要なsheet/rangeだけを抽出し、ReviewerへExcel全体を無条件に投入しない。
 
@@ -523,7 +527,16 @@ Reviewer          Sonnet
 
 Reviewerを最初からOpusにする必要はない。
 
-実運用でSonnetレビューの見逃しが確認された場合に限り、ReviewerのOpus化を検討する。
+ただし、Reviewerが見る情報はすべてContext Collectorが抽出したSpecification Bundleに限られる。Collectorが仕様（特にRedmine Notesの後発変更やIFのremarks）を落とすと、Reviewerがどれだけ優秀でも検出できない。
+
+したがってモデル強化を検討する順序は以下とする。
+
+``` text
+1. Context Collector
+2. Reviewer
+```
+
+実運用で見逃しが確認された場合、まずSpecification Bundleに必要仕様が含まれていたかを確認する。含まれていなければCollector側の問題であり、Reviewerを変更しても解決しない。
 
 ## 16. Token方針
 
@@ -593,7 +606,7 @@ Skill実装完了条件:
 9.  既存PR本文生成処理へ接続
 10. PR作成を行わずSTOPすることをテスト
 
-# 20. Claude Codeへ渡す実装指示
+## 20. Claude Codeへ渡す実装指示
 
 この仕様書を既存Skillの改修担当Claude
 Codeへ渡した場合、以下の工程を守る。
@@ -690,7 +703,7 @@ Orchestrator
 
 IFファイル名だけで仕様を推測しない。
 
-Excel解析に一時ファイルが必要なら`/tmp`等へコピーして処理し、元ファイルへ保存しない。
+xlsxの読み取りは環境構築仕様書6.1のExcel解析ツールを`sheet`/`range`指定で呼び出して行う。`/reference`はRO mountなので元ファイルへの保存は失敗するが、Skill側でも保存を試みる処理を書かない。一時ファイルが必要ならコンテナの一時領域を使う。
 
 ## 20.6 Specification Bundleの証跡
 
@@ -968,9 +981,9 @@ PR Creation Performed: NO
 
 20.15の主要受入試験を実行し、既存PR本文生成機能のregressionがなく、PRが作成されないことを確認して初めて完了とする。
 
-# 22. チーム既存Backend APIチェックSkillとの統合
+## 21. チーム既存Backend APIチェックSkillとの統合
 
-## 22.1 基本方針
+## 21.1 基本方針
 
 チームで既に用意されている「既存Backend
 APIとして満たすべき実装・規約を確認するSkill」を、本Skillのレビュー工程で再利用する。
@@ -990,7 +1003,7 @@ APIとして満たすべき実装・規約を確認するSkill」を、本Skill�
 
 既存Backend APIチェックSkill自身にはコードを修正させない。
 
-## 22.2 実装前の既存Skill解析
+## 21.2 実装前の既存Skill解析
 
 本Skillを実装するClaude Codeは、最初にチーム既存Backend
 APIチェックSkillを探索・解析する。
@@ -1028,7 +1041,23 @@ Project conventions
 
 実際の項目は既存Skillの内容から取得し、推測で決めない。
 
-## 22.3 既存Skillの保護
+### 出力契約の確認
+
+既存Skillの出力が構造化されているとは限らない。解析時に以下を判定する。
+
+``` text
+STRUCTURED   : severity / location / problem を機械的に取り出せる
+SEMI         : 一定の書式はあるが解釈が必要
+FREE_TEXT    : 自由文
+```
+
+`SEMI`または`FREE_TEXT`の場合、本Skill側に既存Skill出力をConsolidated Findings形式へ変換するadapterを置く。adapterは既存Skillを変更せず、出力を読むだけとする。
+
+変換時に元の指摘内容・severityを改変しない。変換できない指摘は`UNPARSED`として元文をそのまま保持し、人間へ提示する。`UNPARSED`をPASSの根拠にしない。
+
+出力が不安定でadapterが成立しない場合は、21.3に従い人間へ理由を提示して停止する。
+
+## 21.3 既存Skillの保護
 
 禁止:
 
@@ -1043,7 +1072,7 @@ Project conventions
 
 どうしても既存Skill側の変更が必要と判断した場合、本Skillの実装範囲として勝手に変更せず、人間へ理由を提示して停止する。
 
-## 22.4 チェック責務の分離
+## 21.4 チェック責務の分離
 
 原則:
 
@@ -1075,7 +1104,7 @@ Unrequested scope expansion
 
 ただし、この補完範囲も既存Skill解析後に確定する。
 
-## 22.5 優先順位
+## 21.5 優先順位
 
 判断根拠の基本優先順位:
 
@@ -1105,7 +1134,7 @@ Conflict Description
 Human Decision Required
 ```
 
-## 22.6 Review Pipeline
+## 21.6 Review Pipeline
 
 レビュー工程を以下に変更する。
 
@@ -1139,7 +1168,7 @@ Team Backend API Skill   Specification Bundle
        両レビュー再実行
 ```
 
-## 22.7 Consolidated Findings
+## 21.7 Consolidated Findings
 
 本SkillはTeam Backend API SkillとAdversarial Reviewerの結果を統合する。
 
@@ -1164,7 +1193,7 @@ Team Backend API Skillが独自severityを持つ場合、元severityを失わな
 
 既存SkillのFinding内容を書き換えて意味を変えない。
 
-## 22.8 修正責務
+## 21.8 修正責務
 
 Findingsを検出するAgentとコードを修正するAgentを分離する。
 
@@ -1189,7 +1218,7 @@ Team Backend API SkillおよびReviewerは原則コードを変更しない。
 
 修正はMain Agentが行う。
 
-## 22.9 再レビュー
+## 21.9 再レビュー
 
 Main Agentによる修正後は以下を再実行する。
 
@@ -1206,7 +1235,7 @@ PASSを、そのまま新しいdiffへ流用しない。
 
 diff stateが変化した場合は新しいレビューサイクルとして扱う。
 
-## 22.10 既存Skill障害時
+## 21.10 既存Skill障害時
 
 Team Backend API Skillが実行不能の場合、原則Fail Closed。
 
@@ -1220,7 +1249,7 @@ TEAM_SKILL_UNAVAILABLE
 
 本Skillが既存Skillの代替チェックを即席で生成して成功扱いにしない。
 
-## 22.11 受入試験追加
+## 21.11 受入試験追加
 
 以下を本Skillの受入試験へ追加する。
 
@@ -1241,7 +1270,7 @@ TEAM_SKILL_UNAVAILABLE
 [ ] Team Skill実行不能時に無条件PASSしない
 ```
 
-## 22.12 実装時の重要原則
+## 21.12 実装時の重要原則
 
 本Skillを「すべてのBackendルールを内包する巨大Skill」にしない。
 
@@ -1252,9 +1281,9 @@ Truthとして扱う。
 
 これにより、チーム側のBackend規約変更時に本Skillへ同じ変更を二重反映する必要がない構造を維持する。
 
-# 24. 仕様ソース状態・競合管理
+## 22. 仕様ソース状態・競合管理
 
-## 24.1 Source Status
+## 22.1 Source Status
 
 各仕様ソースについて「記載がない」と「取得・解析できなかった」を区別する。
 
@@ -1280,7 +1309,7 @@ UNAVAILABLE
 
 `NOT_FOUND`、`AMBIGUOUS`、`PARSE_FAILED`、必須ソースの`UNAVAILABLE`を「問題なし」と解釈しない。
 
-## 24.2 Specification Bundleへの状態記録
+## 22.2 Specification Bundleへの状態記録
 
 例:
 
@@ -1298,7 +1327,7 @@ Reason: Controller validation only; no persistence/DB change
 
 `NOT_REQUIRED`には理由を必須とする。
 
-## 24.3 仕様競合
+## 22.3 仕様競合
 
 以下のような明示仕様同士の矛盾を検出した場合:
 
@@ -1322,16 +1351,16 @@ Notes等に明確な変更指示・日時・文脈があり、既存チーム運
 
 その運用ルール自体をClaudeが推測して作らない。
 
-## 24.4 既存コードとの不一致
+## 22.4 既存コードとの不一致
 
 明示仕様が一貫しており、既存コードだけが異なる場合は原則として`SPEC_CONFLICT`ではなくImplementation
 Findingとして扱う。
 
 既存コードが存在することだけを理由に明示仕様を無効化しない。
 
-# 25. Team Backend API Skill Coverage Matrix
+## 23. Team Backend API Skill Coverage Matrix
 
-## 25.1 目的
+## 23.1 目的
 
 Team Backend API SkillをSingle Source of
 Truthとして再利用するが、そのPASSをコード全体の正しさの保証とはみなさない。
@@ -1367,7 +1396,7 @@ UNKNOWN
 
 実際のCoverageは既存Skillの実装から判断する。
 
-## 25.2 Reviewerとの責務分担
+## 23.2 Reviewerとの責務分担
 
 -   `YES`: 原則として同一ルールをSpecification Reviewerへ重複実装しない
 -   `PARTIAL`: 不足部分だけ補完
@@ -1376,9 +1405,9 @@ UNKNOWN
 
 Coverage MatrixはチームSkillの変更時に再評価できる構造にする。
 
-# 26. Review Noise Control
+## 24. Review Noise Control
 
-## 26.1 Gate対象
+## 24.1 Gate対象
 
 自動修正・再レビューのGate対象は原則:
 
@@ -1391,7 +1420,7 @@ MAJOR
 
 `MINOR`と`NIT`だけではReview StateをFAILにしない。
 
-## 26.2 Non-blocking Findings
+## 24.2 Non-blocking Findings
 
 MINOR/NITは以下のように分離して提示する。
 
@@ -1402,7 +1431,7 @@ Non-blocking Observations
 
 重大Findingを大量のstyle指摘で埋没させない。
 
-## 26.3 NIT制御
+## 24.3 NIT制御
 
 NITを無制限に列挙しない。
 
@@ -1415,15 +1444,15 @@ NITを無制限に列挙しない。
 
 目的は粗探しではなく、重大な仕様違反・不具合の検出。
 
-# 27. Production投入前評価
+## 25. Production投入前評価
 
-## 27.1 目的
+## 25.1 目的
 
 「Skillが実行できた」ことと「Skillが有効である」ことを区別する。
 
 Production運用へ定着させる前に、可能なら過去の実装/PRを用いて評価する。
 
-## 27.2 評価対象
+## 25.2 評価対象
 
 目安として5〜10件以上の過去API変更を候補とする。
 
@@ -1439,7 +1468,7 @@ validation/error responseを含む変更
 
 機密情報・履歴の利用は会社ルールに従う。
 
-## 27.3 評価観点
+## 25.3 評価観点
 
 最低限:
 
@@ -1452,7 +1481,7 @@ Known重大問題を検出できたか
 Team Skillとの重複Finding
 ```
 
-## 27.4 Production投入判断
+## 25.4 Production投入判断
 
 次のような状態では調整を行う。
 
@@ -1465,9 +1494,11 @@ Team Skillとの重複Finding
 モデルをOpusへ変更する前に、context不足、仕様抽出、責務分担、prompt、Coverage
 Matrixを確認する。
 
-# 28. 追加のProduction運用上の防御
+見逃しが確認された場合は、まずSpecification Bundleに該当仕様が含まれていたかを確認し、含まれていなければContext Collector側を先に改善する（15章参照）。
 
-## 28.1 Scope / Diff Boundary
+## 26. 追加のProduction運用上の防御
+
+## 26.1 Scope / Diff Boundary
 
 Reviewerは原則として今回の変更diffを中心に評価する。
 
@@ -1485,7 +1516,7 @@ OUT_OF_SCOPE
 
 重大な既存security/data-loss問題等を偶然発見した場合は、人間へ別件として通知する。
 
-## 28.2 Generated Artifacts / Secrets
+## 26.2 Generated Artifacts / Secrets
 
 Specification Bundle、Reviewer出力、一時Excel変換物、Request/Response
 evidence等にsecretを残さない。
@@ -1504,7 +1535,7 @@ private certificate/key
 
 一時成果物は原則コンテナの一時領域へ置き、不要になったら破棄する。
 
-## 28.3 Production Data禁止
+## 26.3 Production Data禁止
 
 Runtime Evidence取得のために本番DB・本番APIへ接続しない。
 
@@ -1512,7 +1543,7 @@ Runtime Evidence取得のために本番DB・本番APIへ接続しない。
 
 接続先が不明な場合は実行せず、人間へ確認する。
 
-## 28.4 Destructive Command Boundary
+## 26.4 Destructive Command Boundary
 
 レビュー・PR本文生成のために以下を実行しない。
 
@@ -1528,7 +1559,7 @@ remote branch削除
 
 必要性が発生した場合は本Skillの自動処理外として人間へ返す。
 
-## 28.5 Timeout / Cost Control
+## 26.5 Timeout / Cost Control
 
 Context探索やレビューが無制限に継続しないよう上限を設ける。
 
@@ -1543,7 +1574,7 @@ subagent呼び出し回数
 
 初期運用では速度・token使用量を記録し、Production投入前評価に利用する。
 
-## 28.6 Observability
+## 26.6 Observability
 
 各実行で最低限以下を確認可能にする。
 
@@ -1563,7 +1594,7 @@ chain-of-thoughtは保存・出力しない。
 
 目的は、失敗時に「どこで止まったか」を人間が判断できること。
 
-## 28.7 Version Drift
+## 26.7 Version Drift
 
 以下は将来変更され得る。
 
@@ -1581,7 +1612,7 @@ Repository conventions
 
 既存Skill/テンプレートを実行時または適切なタイミングで参照し、変更後も二重管理にならない構造を優先する。
 
-## 28.8 Rollout
+## 26.8 Rollout
 
 最初から全案件の必須Gateにしない。
 
@@ -1601,7 +1632,7 @@ Phase 3: Gate
 
 チーム正式Gate化は個人判断で行わない。
 
-# 29. 追加受入試験
+## 27. 追加受入試験
 
 ``` text
 [ ] Source Statusを区別できる
@@ -1621,7 +1652,7 @@ Phase 3: Gate
 [ ] Production投入前に過去変更で評価できる
 ```
 
-# 30. Claudeへの開始指示
+## 28. Claudeへの開始指示
 
 この仕様書を受け取ったClaude
 Codeは、最初に既存Skillと関連ファイルを探索・解析すること。
