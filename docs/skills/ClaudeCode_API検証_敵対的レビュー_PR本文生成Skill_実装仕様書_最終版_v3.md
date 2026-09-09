@@ -79,6 +79,23 @@ Skill側にも変更禁止を記載するが、Skillの指示をセキュリテ�
 
 WindowsネイティブClaudeから本Skillを実行することを正規経路としない。
 
+### 3.1 起動時の環境チェック
+
+Skillは処理を始める前に、正規環境で動いているかを実際に確認する。指示文だけで「コンテナで実行すること」と書いても、Windowsネイティブから起動された場合を検出できないため。
+
+確認内容:
+
+``` text
+[ ] /workspace/repo-backend が存在し、git repositoryである
+[ ] /reference が存在する
+[ ] /reference 直下へのファイル作成が失敗する（touch等で実際に試す）
+[ ] Excel解析ツールが呼び出せる
+```
+
+1つでも満たさない場合は`ENV_PRECHECK_FAILED`として即時停止し、Redmine取得やレビューへ進まない。
+
+このチェックはscriptとして実装し、Skillの最初のステップで必ず呼ぶ。
+
 ## 4. 対象情報
 
 ### Redmine
@@ -134,6 +151,16 @@ xlsxの読み取りには環境構築仕様書6.1で派生イメージに含め�
 /reference/er/
 ```
 
+受け入れる形式:
+
+``` text
+.md / .txt   そのまま読む
+.xlsx        環境構築仕様書6.1のExcel解析ツールで読む
+.pdf         テキスト抽出できる場合のみ
+```
+
+`.docx`、`.pptx`、`.drawio`、画像等はSkillから読めない。これらの資料が必要な場合は、人間が上記形式へ変換して配置する。変換されていない資料はContext Collectorが`PARSE_FAILED`として扱い、読めたふりをしない。
+
 確認対象:
 
 -   対象機能の設計
@@ -173,11 +200,15 @@ Main Agent (Opus)
       ↓
 ユーザーがPR本文生成Skillを明示的に起動
       ↓
+起動時環境チェック (3.1)
+      ↓
+WIP commit → reviewed_commit SHA固定 (20.8)
+      ↓
 Ticket ID取得
       ↓
 Redmine取得
 Reference検索
-git diff取得
+git diff <base>..<SHA> 取得
       ↓
 Context Collector (Sonnet)
       ↓
@@ -214,11 +245,34 @@ Human Review
 
 本Skillが明示的に起動された場合だけレビューを実行する。
 
+「明示的に起動された場合だけ」は指示文ではなく設定で担保する。Claude CodeのSkillはdescriptionが会話内容に一致するとClaudeが自動起動できるため、SKILL.mdのfrontmatterに以下を設定し、ユーザーの`/<skill名>`以外からは起動できないようにする。
+
+``` yaml
+disable-model-invocation: true
+```
+
 ## 6. Context Collector
 
 モデル: Sonnet。
 
+`.claude/agents/`配下のSubagentとして定義し、`tools:`にRead、Grep、Glob、Bash（Excel解析ツール呼び出し用）だけを許可する。EditとWriteは与えない。
+
 目的は「大量資料をReviewerへ丸投げすること」ではなく、広く検索して必要部分だけを抽出すること。
+
+### 検索除外
+
+Collectorは以下をSpecification Bundleへ含めない。Grep/Read対象からも除外する。
+
+``` text
+.env, .env.*
+*.pem, *.key, *.p12
+credentials*, secrets*
+application-local.*, application-secret.* 等のprofile固有設定
+~/.claude/ 配下
+.git/ 配下
+```
+
+除外パターンはproject側の規約に合わせて追加できるようにし、Skill本体へハードコードしない。
 
 原則:
 
@@ -280,6 +334,8 @@ Implementation
 モデル: Sonnet。
 
 Main Agentとはfresh contextの別Subagentとして起動する。
+
+`.claude/agents/`配下に定義し、`tools:`にRead、Grep、Glob、Bash（git diff / git show / test実行等の読み取り用途）だけを許可する。EditとWriteは与えない。「Reviewerはコードを修正しない」は指示ではなくこのツール制限で強制する。
 
 Reviewerへ原則渡さないもの:
 
@@ -410,7 +466,7 @@ BLOCKER/MAJOR発生時:
 4.  diffを更新
 5.  fresh Reviewerで再レビュー
 
-レビュー結果は可能ならcommit SHAまたはdiff stateと関連付ける。
+レビュー結果はcommit SHAと関連付ける（20.8参照）。working treeの状態をレビュー対象にしない。
 
 PASS後に実装が変更された場合、以前のPASSを無効として再レビューする。
 
@@ -507,9 +563,9 @@ format conversionによる元ファイル更新
 Excel workbookへの保存
 ```
 
-必要な中間生成物がある場合は`/reference`ではなく、実装repo内の明示的な一時領域またはコンテナの一時ディレクトリを使用する。
+必要な中間生成物がある場合は`/reference`ではなく、コンテナの一時ディレクトリ（`/tmp`配下等）を使用する。
 
-ただし生成物をGitへ誤追加しないよう注意する。
+実装repo内には置かない。repo内に置くとMutagenでWindows側へ同期され、`git status`にも現れるため。
 
 重要:
 
@@ -524,6 +580,8 @@ Main Agent        Opus
 Context Collector Sonnet
 Reviewer          Sonnet
 ```
+
+Main AgentのモデルはClaude Code起動時の設定（`--model`または`settings.json`の`model`）で決まる。Skill側からMain Agentのモデルを指定する手段はない。Opusで運用したい場合は、コンテナ内Claude Codeの起動側設定で担保する。
 
 Reviewerを最初からOpusにする必要はない。
 
@@ -557,7 +615,9 @@ Reviewer input:        15k〜40k
 
 以下の場合、PASSやPR本文完成扱いにしない。
 
+-   3.1の起動時環境チェックに失敗した
 -   Ticketを取得できない
+-   Team Backend API Skillを実行できない（21.10参照）
 -   対象IFを特定できない
 -   必須設計資料が不足
 -   IFの解析に失敗
@@ -573,7 +633,9 @@ Reviewer input:        15k〜40k
 Skill実装完了条件:
 
 ``` text
-[ ] 明示起動時のみ実行される
+[ ] 明示起動時のみ実行される（disable-model-invocation: true）
+[ ] 起動時環境チェックが正規環境以外で停止する
+[ ] Collector / Reviewer の tools に Edit / Write が含まれない
 [ ] branchからRedmine Ticketを取得できる
 [ ] Redmine Notesを含めて仕様化できる
 [ ] /referenceから対象IFを取得できる
@@ -689,6 +751,41 @@ Orchestrator
 
 一つの巨大promptへ全責務を押し込まない。
 
+### Claude Code上の実体への対応
+
+概念上の責務は、Claude Codeでは次の3種類の実体に分けて実装する。
+
+``` text
+責務                          実体
+----------------------------  ------------------------------------------
+Orchestrator                  SKILL.md（手順のみ。判定ロジックは持たない）
+Ticket Resolver               scripts/ （branch名→Ticket ID。既存Skillの処理を呼ぶ）
+Redmine Collector             既存Skillの取得処理をそのまま使用
+Reference Locator             Context Collector agent 内の手順
+Context Collector             .claude/agents/context-collector.md
+Specification Bundle Builder  Context Collector agent の出力形式
+Adversarial Reviewer          .claude/agents/spec-reviewer.md
+Verification Loop             SKILL.md の手順 + scripts/（diff state記録、cycle数管理）
+Runtime Evidence Collector    scripts/（request実行とredact）
+Existing PR Body Generator    既存Skillの処理をそのまま使用
+環境チェック                   scripts/（3.1）
+Reviewer出力検証               scripts/（20.7）
+```
+
+方針:
+
+-   判定・記録・検証のように決定的であるべき処理はscriptsに置く。Claudeの読解に依存させない
+-   agentsは`model:`と`tools:`をfrontmatterで固定する
+-   SKILL.mdはどのscript/agentをどの順に呼ぶかだけを書く
+
+### 配置場所
+
+本Skill、agents、scriptsは個人用として`~/.claude/`配下（環境構築仕様書5.3で永続化する領域）に置く。
+
+実装repo内の`.claude/`には置かない。repo内に置くとMutagenでWindows側へ同期され、チームのリポジトリへコミットされる対象になるため。チームで共有する段階になったら、その時点でrepo内への移動をチームで判断する。
+
+ただし既存のPR本文生成SkillやTeam Backend API Skillがrepo内`.claude/`にある場合、それらは動かさない。
+
 ## 20.5 Reference探索
 
 `/reference`はRead Only。
@@ -727,45 +824,61 @@ Requirement: ...
 
 Reviewerは構造化されたFindingsを返す。
 
-最低限:
+出力の末尾に、以下のJSONをフェンス付きコードブロック（言語指定`json`）で1つだけ置く。自由文の説明はJSONの前に書いてよいが、ループ制御はJSONだけを読む。
 
-``` text
-Review State: PASS | FAIL
-Reviewed Diff State: <commit SHA or diff fingerprint>
-
-Findings:
-- Severity
-- Category
-- File/Location
-- Specification Source
-- Problem
-- Expected Behavior
-- Evidence
+``` json
+{
+  "review_state": "PASS | FAIL",
+  "reviewed_commit": "<commit SHA>",
+  "findings": [
+    {
+      "severity": "BLOCKER | MAJOR | MINOR | NIT",
+      "category": "...",
+      "location": "path/to/file:line",
+      "specification_source": "...",
+      "problem": "...",
+      "expected_behavior": "...",
+      "evidence": "..."
+    }
+  ]
+}
 ```
 
-BLOCKER/MAJORが存在する場合:
+BLOCKER/MAJORが1件でもあれば`review_state`は`FAIL`。
+
+### 検証script
+
+Reviewer出力はMain Agentが読解せず、scriptで検証する。
 
 ``` text
-Review State = FAIL
+[ ] json ブロックがちょうど1つある
+[ ] 必須キーがすべて存在する
+[ ] severity が定義済みの値である
+[ ] BLOCKER/MAJOR があるのに review_state が PASS になっていない
+[ ] reviewed_commit が今回レビュー対象のSHAと一致する
 ```
+
+1つでも失敗したら`REVIEWER_OUTPUT_INVALID`とし、PASS扱いにしない。修正を試みず、fresh Reviewerで再実行する。再実行でも不正なら人間へエスカレーションする。
 
 Reviewerは修正コードを書かず、問題と期待動作を返す。
 
 ## 20.8 Diff State
 
-レビュー対象を識別する。
+レビュー対象はcommit SHAで固定する。working treeのdiff fingerprintは使わない。
 
-可能なら:
+理由: 実装repoはMutagenでWindows側と双方向同期されているため、レビュー中にWindows側で誰かがファイルを触るとworking treeが変わる。fingerprint方式ではPASSが理由なく無効化されるか、逆に変更後の状態を見ずにレビューを続ける。
 
--   commit SHA
--   working tree diff fingerprint
--   changed file set
+手順:
 
-を記録する。
+1.  Skill起動時にworking treeが clean でなければ、レビュー用のWIP commitを作る（メッセージ例: `wip: review target`）
+2.  そのHEAD SHAを`reviewed_commit`としてCollector・Reviewer・Team Skillへ渡す
+3.  ReviewerとTeam Skillは`git diff <base>..<SHA>`と`git show`で対象を読む
+4.  修正が入ったら再びcommitし、新しいSHAで再レビューする
+5.  PR本文生成直前にHEADが最後にPASSしたSHAと一致することを確認する
 
-レビュー後に対象diffが変わった場合、PASSを再利用しない。
+WIP commitは人間がPR作成前にsquash等で整理する前提とし、Skillはpush・rebase・squashを行わない。
 
-PR本文生成直前にもdiff stateを確認する。
+レビュー中はWindows側で対象repoを編集しないことを運用ルールとして人間へ提示する。
 
 ## 20.9 修正ループ制御
 
@@ -854,7 +967,7 @@ GitHub REST/GraphQL PR create mutation
 -   Stop Hook
 -   unrelated command Hook
 
-ユーザーがPR本文生成Skillを明示的に起動したときだけ実行する。
+ユーザーがPR本文生成Skillを明示的に起動したときだけ実行する。SKILL.mdに`disable-model-invocation: true`を設定する（5章参照）。
 
 既存Hookが存在しても、今回の目的に不要なら勝手に変更しない。
 
@@ -866,6 +979,15 @@ GitHub REST/GraphQL PR create mutation
 Main Agent        Opus
 Context Collector Sonnet
 Reviewer          Sonnet
+```
+
+Main Agentは起動側設定に依存し、Skillからは指定できない（15章参照）。
+
+CollectorとReviewerは`.claude/agents/*.md`のfrontmatterで`model:`と`tools:`を固定する。
+
+``` yaml
+model: sonnet
+tools: Read, Grep, Glob, Bash
 ```
 
 実際のClaude Code
@@ -938,8 +1060,11 @@ Skill/Subagent設定でモデル指定可能な箇所を確認して実装する
 以下の場合は処理を成功扱いにしない。
 
 ``` text
+ENV_PRECHECK_FAILED
 Ticket unresolved
 Redmine unavailable
+TEAM_SKILL_UNAVAILABLE
+REVIEWER_OUTPUT_INVALID (再実行後も)
 IF ambiguous
 Required reference missing
 Reference parse failed
@@ -1002,6 +1127,16 @@ APIとして満たすべき実装・規約を確認するSkill」を、本Skill�
 6.  修正が必要な場合はMain AgentへFindingsを返す
 
 既存Backend APIチェックSkill自身にはコードを修正させない。
+
+### 実行コンテキスト
+
+Team Backend API SkillはMain Agentのcontextでは起動しない。
+
+Claude CodeのSkillは起動したAgentのcontextへ読み込まれる。Main Agentがそのまま起動すると、コードを書いた本人が自分の実装を規約チェックすることになり、7章のfresh context原則と矛盾する。
+
+したがって、Team Backend API Skillはfresh contextのSubagent（`.claude/agents/`配下、`tools:`にEdit/Writeを含めない）を起動し、そのSubagentの中で呼び出す。Subagentには`reviewed_commit`のSHAとdiff取得方法だけを渡し、Main Agentの実装経緯を渡さない。
+
+Team Backend API Skill自体がすでにSubagentとして実装されている場合は、そのまま利用してよい。
 
 ## 21.2 実装前の既存Skill解析
 
@@ -1139,16 +1274,16 @@ Human Decision Required
 レビュー工程を以下に変更する。
 
 ``` text
-Implementation
+Implementation (commit SHA)
       │
       ├──────────────────────┐
       │                      │
       ▼                      ▼
 Team Backend API Skill   Specification Bundle
-      │                      │
+ (fresh subagent)            │
       │                      ▼
       │              Adversarial Reviewer
-      │                      │
+      │               (fresh subagent)
       └──────────┬───────────┘
                  ▼
         Consolidated Findings
@@ -1256,6 +1391,7 @@ TEAM_SKILL_UNAVAILABLE
 ``` text
 [ ] Team Backend API Skillを特定できる
 [ ] Team Backend API Skill自体を変更していない
+[ ] Team Backend API SkillをMain Agentではなくfresh subagentで実行している
 [ ] Team Backend API Skillをレビュー工程から実行できる
 [ ] Team Skill Findingsを取得できる
 [ ] Team Skillのチェック範囲を把握できる

@@ -146,6 +146,8 @@ Claude Codeの設定、Skill等はコンテナ再作成で失われないよう�
 
 `~/.claude`全体を永続化する場合は、認証情報や会社ポリシーとの整合を確認する。
 
+本題Skill（agents、scripts含む）はこの永続領域の`~/.claude/skills`および`~/.claude/agents`に置く。実装repo内の`.claude/`には置かない。repo内に置くとMutagenでWindows側へ同期され、チームリポジトリへのコミット対象になるため。
+
 ### 5.4 Redmineアクセス
 
 Redmineの取得方法・認証は、既存のPR本文生成Skillが現在使用しているものをそのまま使う。本仕様で新しい認証方式や認証情報の保存場所を設計しない。
@@ -215,7 +217,18 @@ Claude Codeを使用するAPI実装作業ではコンテナ側Claudeを利用す
 podman exec -it <development-container> claude
 ```
 
-またはClaude用コンテナを起動する既存プロジェクトの方式に統合する。
+### 既存devコンテナとの関係
+
+Claude用に別コンテナを並走させず、既存のdevコンテナ自体を派生イメージから起動する。
+
+理由:
+
+-   Mutagenの同期先は特定のコンテナ（またはそのvolume）に紐づく。別コンテナを並走させると、同期先volumeの共有や2つ目のsessionが必要になり、既存Mutagen構成の変更につながる
+-   派生イメージは標準イメージにClaude CodeとExcel解析ツールを足しただけの上位互換なので、devコンテナとして使っても既存作業に影響しない
+
+したがって既存の起動定義（compose / script等）でイメージ名を派生イメージへ差し替え、`/reference`のRO mountを追加するのが最小差分となる。
+
+イメージ名の差し替えがチームの起動定義を書き換えることになる場合は、個人用の起動定義（override file等）で差し替え、チーム共有の定義は変更しない。
 
 WindowsネイティブClaude Codeは廃止必須とはしない。ただし、本仕様のRead
 Only保証が必要なSkillを実行するときはコンテナ版を正規経路とする。
@@ -291,7 +304,7 @@ Only保証そのものではない。
 [ ] xlsx解析後も元ファイルのタイムスタンプ・内容が変わっていない
 [ ] コンテナ内から既存Skillの方法でRedmineを取得できる
 [ ] コンテナ再作成後もClaude Codeを再手動インストールする必要がない
-[ ] Claude CodeのためだけにNode.js/npmが追加されていない
+[ ] 派生イメージの追加パッケージがClaude CodeとExcel解析ツールだけである
 [ ] 必要なClaude設定/Skillが再利用できる
 [ ] Windows上の不要なディレクトリがClaudeコンテナから見えない
 ```
